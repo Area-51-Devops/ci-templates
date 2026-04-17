@@ -23,8 +23,6 @@ jobs:
   update-manifest:
     name: "CD – Update Helm image tag"
     runs-on: ubuntu-latest
-    # Only proceed when the calling CI workflow actually succeeded.
-    if: ${{ github.event.workflow_run.conclusion == 'success' }}
 
     permissions:
       contents: read
