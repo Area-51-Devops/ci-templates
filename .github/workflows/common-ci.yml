@@ -271,20 +271,22 @@ jobs:
         working-directory: ${{ inputs.working_directory }}
         run: npm run build
 
-      - name: Build Docker Image
-        working-directory: ${{ inputs.docker_context }}
+      - name: Resolve Dockerfile Path
+        id: dockerfile
         run: |
           DOCKERFILE="${{ inputs.dockerfile_path }}"
           if [ -z "$DOCKERFILE" ]; then
             DOCKERFILE="${{ inputs.image_name }}/Dockerfile"
           fi
+          echo "path=$DOCKERFILE" >> $GITHUB_OUTPUT
+
+      - name: Build Docker Image
+        working-directory: ${{ inputs.docker_context }}
+        run: |
           docker build \
-            -f "$DOCKERFILE" \
+            -f "${{ steps.dockerfile.outputs.path }}" \
             -t ${{ secrets.DOCKER_USERNAME }}/${{ inputs.service-name }}:${{ needs.prepare.outputs.tag }} \
             .
-        env:
-          # Pass tag through env so working-directory override doesn't lose needs context
-          IMAGE_TAG: ${{ needs.prepare.outputs.tag }}
 
       - name: Save image as tar artifact
         run: |
@@ -297,12 +299,9 @@ jobs:
         with:
           name: docker-image-${{ inputs.service-name }}
           path: /tmp/docker-image.tar
-          # Artifacts only need to live long enough for trivy + push jobs
           retention-days: 1
 
   # ── JOB 6: TRIVY ────────────────────────────────────────────────────────────
-  # Downloads the EXACT image built in the build job — guarantees what is
-  # scanned is what gets pushed. A rebuild here would be a security gap.
   trivy:
     name: "Trivy Image Scan"
     runs-on: ubuntu-latest
@@ -328,17 +327,14 @@ jobs:
           severity: HIGH,CRITICAL
 
   # ── JOB 7: PUSH ─────────────────────────────────────────────────────────────
-  # Only runs after Trivy passes. Downloads the same artifact — not a rebuild.
-  # Pushes semver tag + latest, then creates the git tag.
   push:
     name: "Docker Push"
     runs-on: ubuntu-latest
     needs: [prepare, trivy]
-    # Only push on main — branch builds are scanned but never published
     if: needs.prepare.outputs.push == 'true'
 
     permissions:
-      contents: write   # needed to create git tags
+      contents: write
 
     steps:
       - name: Checkout
