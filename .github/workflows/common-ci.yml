@@ -139,9 +139,6 @@ jobs:
         uses: SonarSource/sonarqube-scan-action@v6
         with:
           projectBaseDir: ${{ inputs.working_directory }}
-          args: >
-            -Dsonar.projectKey=${{ inputs.sonar_project_key }}
-            -Dsonar.projectName=${{ inputs.service-name }}
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
           SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
