@@ -1,0 +1,303 @@
+name: "CI | Build Image, Trivy Scan & Push"
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Reusable workflow — called from a service's CI or from common-ci.yml
+#
+# Job graph:
+#   prepare ──► build ──► trivy ──► push ──► notify
+#
+# The Docker image is built ONCE, saved as a tar artifact, and reused by
+# both trivy and push — no redundant builds.
+#
+# Secrets required:
+#   DOCKER_USERNAME, DOCKER_PASSWORD,
+#   SMTP_HOST, SMTP_PORT, SMTP_USERNAME, SMTP_PASSWORD, EMAIL_TO
+# ──────────────────────────────────────────────────────────────────────────────
+
+on:
+  workflow_call:
+    inputs:
+      working_directory:
+        description: "Path to the service root, e.g. services/account-service"
+        required: true
+        type: string
+      image_name:
+        description: "Docker image name — also used to locate the Dockerfile when dockerfile_path is empty"
+        required: true
+        type: string
+      run_build:
+        description: "Set true for services that need an npm build step before Docker"
+        required: false
+        type: boolean
+        default: false
+      docker_context:
+        description: "Docker build context directory"
+        required: false
+        type: string
+        default: 'services'
+      dockerfile_path:
+        description: "Explicit path to Dockerfile; defaults to <image_name>/Dockerfile when empty"
+        required: false
+        type: string
+        default: ''
+      service-name:
+        description: "Human-readable service name — used for image tags, artifact names, and email subjects"
+        required: true
+        type: string
+
+    secrets:
+      DOCKER_USERNAME:
+        required: true
+      DOCKER_PASSWORD:
+        required: true
+      SMTP_HOST:
+        required: true
+      SMTP_PORT:
+        required: true
+      SMTP_USERNAME:
+        required: true
+      SMTP_PASSWORD:
+        required: true
+      EMAIL_TO:
+        required: true
+
+jobs:
+
+  # ── 1. PREPARE ───────────────────────────────────────────────────────────────
+  # Calculates the semantic version tag and decides whether the image should
+  # be pushed (main branch only).  Outputs are passed to all downstream jobs.
+  #
+  # NOTE: No npm install here — the Docker build handles deps inside the
+  # container, and the lock file was already synced by ci-sonar / ci-snyk.
+  # ─────────────────────────────────────────────────────────────────────────────
+  prepare:
+    name: "Prepare"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    outputs:
+      tag:  ${{ steps.image_tag.outputs.tag }}
+      push: ${{ steps.image_tag.outputs.push }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Calculate Semantic Version (main only)
+        id: semver
+        if: github.ref == 'refs/heads/main'
+        uses: mathieudutour/github-tag-action@v6.2
+        with:
+          github_token: ${{ github.token }}
+          dry_run: true
+          default_bump: patch
+          tag_prefix: 'v'
+
+      - name: Resolve Image Tag
+        id: image_tag
+        run: |
+          if [[ "${{ github.ref }}" == "refs/heads/main" ]]; then
+            echo "tag=${{ steps.semver.outputs.new_tag }}" >> $GITHUB_OUTPUT
+            echo "push=true"                               >> $GITHUB_OUTPUT
+          else
+            SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
+            echo "tag=sha-${SHORT_SHA}"                    >> $GITHUB_OUTPUT
+            echo "push=false"                              >> $GITHUB_OUTPUT
+          fi
+
+  # ── 2. BUILD ─────────────────────────────────────────────────────────────────
+  # Builds the Docker image and saves it as a tar artifact.
+  # ─────────────────────────────────────────────────────────────────────────────
+  build:
+    name: "Docker Build"
+    runs-on: ubuntu-latest
+    needs: prepare
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js (frontend builds only)
+        if: inputs.run_build == true
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Restore npm cache (frontend builds only)
+        if: inputs.run_build == true
+        uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: ${{ runner.os }}-npm-${{ hashFiles(format('{0}/package-lock.json', inputs.working_directory)) }}
+          restore-keys: |
+            ${{ runner.os }}-npm-
+
+      - name: Install dependencies (frontend builds only)
+        if: inputs.run_build == true
+        working-directory: ${{ inputs.working_directory }}
+        run: npm ci || npm install
+
+      - name: Build frontend
+        if: inputs.run_build == true
+        working-directory: ${{ inputs.working_directory }}
+        run: npm run build
+
+      - name: Resolve Dockerfile Path
+        id: dockerfile
+        run: |
+          DOCKERFILE="${{ inputs.dockerfile_path }}"
+          if [ -z "$DOCKERFILE" ]; then
+            DOCKERFILE="${{ inputs.image_name }}/Dockerfile"
+          fi
+          echo "path=$DOCKERFILE" >> $GITHUB_OUTPUT
+
+      - name: Build Docker Image
+        working-directory: ${{ inputs.docker_context }}
+        run: |
+          docker build \
+            -f "${{ steps.dockerfile.outputs.path }}" \
+            -t ${{ secrets.DOCKER_USERNAME }}/${{ inputs.service-name }}:${{ needs.prepare.outputs.tag }} \
+            .
+
+      - name: Save image as tar artifact
+        run: |
+          docker save \
+            ${{ secrets.DOCKER_USERNAME }}/${{ inputs.service-name }}:${{ needs.prepare.outputs.tag }} \
+            -o /tmp/docker-image.tar
+
+      - name: Upload image artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: docker-image-${{ inputs.service-name }}
+          path: /tmp/docker-image.tar
+          retention-days: 1
+
+  # ── 3. TRIVY ─────────────────────────────────────────────────────────────────
+  # Downloads the tar artifact and scans the image for HIGH/CRITICAL CVEs.
+  # Fails (exit-code 1) if any unfixed vulnerabilities are found.
+  # ─────────────────────────────────────────────────────────────────────────────
+  trivy:
+    name: "Trivy Image Scan"
+    runs-on: ubuntu-latest
+    needs: [prepare, build]
+
+    steps:
+      - name: Download image artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: docker-image-${{ inputs.service-name }}
+          path: /tmp
+
+      - name: Load Docker image
+        run: docker load -i /tmp/docker-image.tar
+
+      - name: Trivy Security Scan
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: '${{ secrets.DOCKER_USERNAME }}/${{ inputs.service-name }}:${{ needs.prepare.outputs.tag }}'
+          format: table
+          exit-code: '1'
+          ignore-unfixed: true
+          severity: HIGH,CRITICAL
+
+  # ── 4. PUSH ──────────────────────────────────────────────────────────────────
+  # Only runs on the main branch after Trivy passes.
+  # Tags the image with both the semver tag and latest, then creates a git tag.
+  # ─────────────────────────────────────────────────────────────────────────────
+  push:
+    name: "Docker Push"
+    runs-on: ubuntu-latest
+    needs: [prepare, trivy]
+    if: needs.prepare.outputs.push == 'true'
+
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download image artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: docker-image-${{ inputs.service-name }}
+          path: /tmp
+
+      - name: Load Docker image
+        run: docker load -i /tmp/docker-image.tar
+
+      - name: Docker Login
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Push Docker Image (semver + latest)
+        run: |
+          docker push ${{ secrets.DOCKER_USERNAME }}/${{ inputs.service-name }}:${{ needs.prepare.outputs.tag }}
+          docker tag  ${{ secrets.DOCKER_USERNAME }}/${{ inputs.service-name }}:${{ needs.prepare.outputs.tag }} \
+                      ${{ secrets.DOCKER_USERNAME }}/${{ inputs.service-name }}:latest
+          docker push ${{ secrets.DOCKER_USERNAME }}/${{ inputs.service-name }}:latest
+
+      - name: Create Git Tag
+        uses: mathieudutour/github-tag-action@v6.2
+        with:
+          github_token: ${{ github.token }}
+          custom_tag: ${{ needs.prepare.outputs.tag }}
+          tag_prefix: ''
+
+  # ── 5. NOTIFY ────────────────────────────────────────────────────────────────
+  # Sends a success or failure email on main-branch runs regardless of outcome.
+  # ─────────────────────────────────────────────────────────────────────────────
+  notify:
+    name: "Notify"
+    runs-on: ubuntu-latest
+    needs: [prepare, build, trivy, push]
+    if: always() && github.ref == 'refs/heads/main'
+
+    steps:
+      - name: Send Email (Success)
+        if: ${{ !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled') }}
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: ${{ secrets.SMTP_HOST }}
+          server_port: ${{ secrets.SMTP_PORT }}
+          username: ${{ secrets.SMTP_USERNAME }}
+          password: ${{ secrets.SMTP_PASSWORD }}
+          subject: "CI Success - ${{ inputs.service-name }} ${{ needs.prepare.outputs.tag }}"
+          body: |
+            Build Successful
+
+            Service:      ${{ inputs.service-name }}
+            Tag:          ${{ needs.prepare.outputs.tag }}
+            Image:        ${{ secrets.DOCKER_USERNAME }}/${{ inputs.service-name }}:${{ needs.prepare.outputs.tag }}
+            Repository:   ${{ github.repository }}
+            Triggered By: ${{ github.actor }}
+          to: ${{ secrets.EMAIL_TO }}
+          from: GitHub Actions
+
+      - name: Send Email (Failure)
+        if: ${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: ${{ secrets.SMTP_HOST }}
+          server_port: ${{ secrets.SMTP_PORT }}
+          username: ${{ secrets.SMTP_USERNAME }}
+          password: ${{ secrets.SMTP_PASSWORD }}
+          subject: "CI Failed - ${{ inputs.service-name }} - Run #${{ github.run_number }}"
+          body: |
+            CI Pipeline Execution Failed
+
+            Service:       ${{ inputs.service-name }}
+            Tag Attempted: ${{ needs.prepare.outputs.tag }}
+            Repository:    ${{ github.repository }}
+            Branch:        ${{ github.ref_name }}
+            Triggered By:  ${{ github.actor }}
+            Logs: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          to: ${{ secrets.EMAIL_TO }}
+          from: GitHub Actions
