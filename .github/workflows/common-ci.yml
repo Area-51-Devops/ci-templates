@@ -240,7 +240,7 @@ jobs:
   build:
     name: "Docker Build"
     runs-on: ubuntu-latest
-    needs: [test, sonar, snyk]
+    needs: [prepare, test, sonar, snyk]
 
     steps:
       - name: Checkout
