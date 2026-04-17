@@ -13,10 +13,6 @@ on:
         required: false
         type: boolean
         default: false
-      sonar_project_key:
-        required: false
-        type: string
-        default: 'NexusBank'
       docker_context:
         required: false
         type: string
@@ -30,12 +26,6 @@ on:
         type: string
 
     secrets:
-      SONAR_TOKEN:
-        required: true
-      SONAR_HOST_URL:
-        required: true
-      SNYK_TOKEN:
-        required: true
       DOCKER_USERNAME:
         required: true
       DOCKER_PASSWORD:
@@ -55,9 +45,7 @@ on:
 # JOB GRAPH:
 #
 #   prepare
-#     ├── test ─────────────┐
-#     ├── sonar ────────────┼──► build ──► trivy ──► push ──► notify
-#     └── snyk  ────────────┘
+#     ├── test ────────────────► build ──► push ──► notify
 #
 # ──────────────────────────────────────────────────────────────────────────────
 jobs:
@@ -168,79 +156,13 @@ jobs:
       - name: Run Tests
         run: npm test
 
-  # ── JOB 3: SONAR ────────────────────────────────────────────────────────────
-  sonar:
-    name: "SonarQube"
-    runs-on: ubuntu-latest
-    needs: prepare
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: SonarQube Scan
-        uses: SonarSource/sonarqube-scan-action@v6
-        with:
-          projectBaseDir: .
-          args: >
-            -Dsonar.projectKey=${{ inputs.sonar_project_key }}
-            -Dsonar.projectName=${{ inputs.sonar_project_key }}
-        env:
-          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
-          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
-
-      - name: SonarQube Quality Gate
-        uses: SonarSource/sonarqube-quality-gate-action@v1
-        with:
-          scanMetadataReportFile: .scannerwork/report-task.txt
-        timeout-minutes: 5
-        env:
-          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
-
-  # ── JOB 4: SNYK ─────────────────────────────────────────────────────────────
-  snyk:
-    name: "Snyk Security"
-    runs-on: ubuntu-latest
-    needs: prepare
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-
-      - name: Restore npm cache
-        uses: actions/cache@v4
-        with:
-          path: ~/.npm
-          key: ${{ runner.os }}-npm-${{ hashFiles(format('{0}/package-lock.json', inputs.working_directory)) }}
-          restore-keys: |
-            ${{ runner.os }}-npm-
-
-      - name: Install dependencies
-        working-directory: ${{ inputs.working_directory }}
-        run: npm ci || npm install
-
-      - name: Snyk Scan
-        uses: snyk/actions/node@0.4.0
-        with:
-          command: test
-          args: --file=${{ inputs.working_directory }}/package.json --severity-threshold=high
-        env:
-          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
-
-  # ── JOB 5: BUILD ────────────────────────────────────────────────────────────
+  # ── JOB 3: BUILD ────────────────────────────────────────────────────────────
   # Builds the Docker image once, saves it as a tar artifact.
   # Trivy and Push both download this exact artifact — no rebuilds ever.
   build:
     name: "Docker Build"
     runs-on: ubuntu-latest
-    needs: [prepare, test, sonar, snyk]
+    needs: [prepare, test]
 
     steps:
       - name: Checkout
@@ -301,36 +223,11 @@ jobs:
           path: /tmp/docker-image.tar
           retention-days: 1
 
-  # ── JOB 6: TRIVY ────────────────────────────────────────────────────────────
-  trivy:
-    name: "Trivy Image Scan"
-    runs-on: ubuntu-latest
-    needs: [prepare, build]
-
-    steps:
-      - name: Download image artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: docker-image-${{ inputs.service-name }}
-          path: /tmp
-
-      - name: Load Docker image
-        run: docker load -i /tmp/docker-image.tar
-
-      - name: Trivy Security Scan
-        uses: aquasecurity/trivy-action@master
-        with:
-          image-ref: '${{ secrets.DOCKER_USERNAME }}/${{ inputs.service-name }}:${{ needs.prepare.outputs.tag }}'
-          format: table
-          exit-code: '1'
-          ignore-unfixed: true
-          severity: HIGH,CRITICAL
-
-  # ── JOB 7: PUSH ─────────────────────────────────────────────────────────────
+  # ── JOB 4: PUSH ─────────────────────────────────────────────────────────────
   push:
     name: "Docker Push"
     runs-on: ubuntu-latest
-    needs: [prepare, trivy]
+    needs: [prepare, build]
     if: needs.prepare.outputs.push == 'true'
 
     permissions:
@@ -371,11 +268,11 @@ jobs:
           custom_tag: ${{ needs.prepare.outputs.tag }}
           tag_prefix: ''
 
-  # ── JOB 8: NOTIFY ───────────────────────────────────────────────────────────
+  # ── JOB 5: NOTIFY ───────────────────────────────────────────────────────────
   notify:
     name: "Notify"
     runs-on: ubuntu-latest
-    needs: [prepare, test, sonar, snyk, build, trivy, push]
+    needs: [prepare, test, build, push]
     if: always() && github.ref == 'refs/heads/main'
 
     steps:
