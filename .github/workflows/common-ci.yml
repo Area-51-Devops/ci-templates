@@ -127,7 +127,7 @@ jobs:
             git commit -m "chore: auto-sync package-lock.json [skip ci]"
             git push
           else
-            echo "Lockfile is fully synced."
+            echo "Lockfile is fully syncedd."
           fi
 
       - name: Run Tests
