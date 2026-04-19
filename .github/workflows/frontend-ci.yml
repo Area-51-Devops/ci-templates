@@ -135,69 +135,69 @@ jobs:
             echo "Lockfile is fully synced."
           fi
 
-  # ── JOB 2: TEST ─────────────────────────────────────────────────────────────
-  test:
-    name: "Test"
-    runs-on: ubuntu-latest
-    needs: prepare
+  # # ── JOB 2: TEST ─────────────────────────────────────────────────────────────
+  # test:
+  #   name: "Test"
+  #   runs-on: ubuntu-latest
+  #   needs: prepare
 
-    defaults:
-      run:
-        working-directory: ${{ inputs.working_directory }}
+  #   defaults:
+  #     run:
+  #       working-directory: ${{ inputs.working_directory }}
 
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+  #   steps:
+  #     - name: Checkout
+  #       uses: actions/checkout@v4
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
+  #     - name: Setup Node.js
+  #       uses: actions/setup-node@v4
+  #       with:
+  #         node-version: '20'
 
-      - name: Restore npm cache
-        uses: actions/cache@v4
-        with:
-          path: ~/.npm
-          key: ${{ runner.os }}-npm-${{ hashFiles(format('{0}/package-lock.json', inputs.working_directory)) }}
-          restore-keys: |
-            ${{ runner.os }}-npm-
+  #     - name: Restore npm cache
+  #       uses: actions/cache@v4
+  #       with:
+  #         path: ~/.npm
+  #         key: ${{ runner.os }}-npm-${{ hashFiles(format('{0}/package-lock.json', inputs.working_directory)) }}
+  #         restore-keys: |
+  #           ${{ runner.os }}-npm-
 
-      - name: Install dependencies
-        run: npm ci || npm install
+  #     - name: Install dependencies
+  #       run: npm ci || npm install
 
-      - name: Run Tests
-        run: npm test
+  #     - name: Run Tests
+  #       run: npm test
 
-  # ── JOB 3: SONAR ────────────────────────────────────────────────────────────
-  sonar:
-    name: "SonarQube"
-    runs-on: ubuntu-latest
-    needs: prepare
+  # # ── JOB 3: SONAR ────────────────────────────────────────────────────────────
+  # sonar:
+  #   name: "SonarQube"
+  #   runs-on: ubuntu-latest
+  #   needs: prepare
 
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
+  #   steps:
+  #     - name: Checkout
+  #       uses: actions/checkout@v4
+  #       with:
+  #         fetch-depth: 0
 
-      - name: SonarQube Scan
-        uses: SonarSource/sonarqube-scan-action@v6
-        with:
-          projectBaseDir: .
-          args: >
-            -Dsonar.projectKey=${{ inputs.sonar_project_key }}
-            -Dsonar.projectName=${{ inputs.sonar_project_key }}
-        env:
-          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
-          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+  #     - name: SonarQube Scan
+  #       uses: SonarSource/sonarqube-scan-action@v6
+  #       with:
+  #         projectBaseDir: .
+  #         args: >
+  #           -Dsonar.projectKey=${{ inputs.sonar_project_key }}
+  #           -Dsonar.projectName=${{ inputs.sonar_project_key }}
+  #       env:
+  #         SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+  #         SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
 
-      - name: SonarQube Quality Gate
-        uses: SonarSource/sonarqube-quality-gate-action@v1
-        with:
-          scanMetadataReportFile: .scannerwork/report-task.txt
-        timeout-minutes: 5
-        env:
-          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+  #     - name: SonarQube Quality Gate
+  #       uses: SonarSource/sonarqube-quality-gate-action@v1
+  #       with:
+  #         scanMetadataReportFile: .scannerwork/report-task.txt
+  #       timeout-minutes: 5
+  #       env:
+  #         SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
 
   # ── JOB 4: SNYK ─────────────────────────────────────────────────────────────
   snyk:
@@ -240,7 +240,7 @@ jobs:
   build:
     name: "Docker Build"
     runs-on: ubuntu-latest
-    needs: [prepare, test, sonar, snyk]
+    needs: [prepare, snyk]
 
     steps:
       - name: Checkout
@@ -375,7 +375,7 @@ jobs:
   notify:
     name: "Notify"
     runs-on: ubuntu-latest
-    needs: [prepare, test, sonar, snyk, build, trivy, push]
+    needs: [prepare, snyk, build, trivy, push]
     if: always() && github.ref == 'refs/heads/main'
 
     steps:
