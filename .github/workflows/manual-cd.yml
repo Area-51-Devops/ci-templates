@@ -33,17 +33,11 @@ jobs:
 
     steps:
 
-      # ─────────────────────────────────────────────
-      # 1. Checkout application repo
-      # ─────────────────────────────────────────────
       - name: Checkout application repo
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      # ─────────────────────────────────────────────
-      # 2. Install required tools
-      # ─────────────────────────────────────────────
       - name: Install CLI tools (kubectl, helm, yq, jq)
         run: |
           set -e
@@ -71,9 +65,6 @@ jobs:
           yq --version
           jq --version
 
-      # ─────────────────────────────────────────────
-      # 3. Get latest git tag
-      # ─────────────────────────────────────────────
       - name: Get latest git tag
         id: get_tag
         run: |
@@ -82,9 +73,6 @@ jobs:
           echo "tag=${TAG}" >> $GITHUB_OUTPUT
           echo "Resolved tag: ${TAG}"
 
-      # ─────────────────────────────────────────────
-      # 4. GitHub App Token
-      # ─────────────────────────────────────────────
       - name: Generate GitHub App Token
         id: app-token
         uses: actions/create-github-app-token@v1
@@ -94,9 +82,6 @@ jobs:
           owner: ${{ github.repository_owner }}
           repositories: "k8s-manifests"
 
-      # ─────────────────────────────────────────────
-      # 5. Checkout manifest repo
-      # ─────────────────────────────────────────────
       - name: Checkout manifest repo
         uses: actions/checkout@v4
         with:
@@ -104,9 +89,6 @@ jobs:
           token: ${{ steps.app-token.outputs.token }}
           path: manifest-repo
 
-      # ─────────────────────────────────────────────
-      # 6. Update Helm values.yaml
-      # ─────────────────────────────────────────────
       - name: Update image tag in values.yaml
         run: |
           TAG=${{ steps.get_tag.outputs.tag }}
@@ -116,9 +98,6 @@ jobs:
 
           cat "$FILE"
 
-      # ─────────────────────────────────────────────
-      # 7. Commit & push changes
-      # ─────────────────────────────────────────────
       - name: Commit and push manifest changes
         run: |
           TAG=${{ steps.get_tag.outputs.tag }}
@@ -133,9 +112,6 @@ jobs:
           git commit -m "chore(${{ inputs.service-name }}): bump image tag to ${TAG}"
           git push
 
-      # ─────────────────────────────────────────────
-      # 8. GET OIDC TOKEN (FIXED - IMPORTANT)
-      # ─────────────────────────────────────────────
       - name: Get Kubernetes OIDC token
         id: oidc
         run: |
@@ -151,9 +127,6 @@ jobs:
 
           echo "TOKEN=$TOKEN" >> $GITHUB_ENV
 
-      # ─────────────────────────────────────────────
-      # 9. Configure kubectl (FIXED AUTH)
-      # ─────────────────────────────────────────────
       - name: Configure kubectl
         run: |
           echo "${{ secrets.K8S_CA_CERT }}" | base64 -d > ca.crt
@@ -176,18 +149,12 @@ jobs:
           kubectl auth can-i get pods -n backend || true
           kubectl auth can-i list secrets -n backend || true
 
-      # ─────────────────────────────────────────────
-      # 10. Deploy Helm chart
-      # ─────────────────────────────────────────────
       - name: Deploy Helm chart
         run: |
           helm upgrade --install ${{ inputs.service-name }} \
             manifest-repo/charts/${{ inputs.service-name }} \
             -n backend
 
-      # ─────────────────────────────────────────────
-      # 11. Verify rollout
-      # ─────────────────────────────────────────────
       - name: Verify rollout
         run: |
           kubectl rollout status deployment/${{ inputs.service-name }} -n backend
