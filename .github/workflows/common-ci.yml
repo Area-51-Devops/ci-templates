@@ -372,12 +372,39 @@ jobs:
           custom_tag: ${{ needs.prepare.outputs.tag }}
           tag_prefix: ''
 
-  # ── JOB 8: NOTIFY ───────────────────────────────────────────────────────────
+  create-release:
+    name: "Create GitHub Release"
+    needs: [prepare, snyk, build, trivy, push]
+    if: |
+      always() &&
+      github.ref == 'refs/heads/main' &&
+      needs.push.result == 'success'
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.prepare.outputs.tag }}
+          name: Release ${{ needs.prepare.outputs.tag }}
+          body: |
+            Release of ${{ inputs.service-name }}
+            Version: ${{ needs.prepare.outputs.tag }}
+            Image: ${{ secrets.DOCKER_USERNAME }}/${{ inputs.service-name }}:${{ needs.prepare.outputs.tag }}
+          generate_release_notes: true
+
+  # ── JOB 9: NOTIFY ───────────────────────────────────────────────────────────
   notify:
     name: "Notify"
     runs-on: ubuntu-latest
     # needs: [prepare, test, sonar, snyk, build, trivy, push]
-    needs: [prepare, snyk, build, trivy, push]
+    needs: [prepare, snyk, build, trivy, push, create-release]
     if: always() && github.ref == 'refs/heads/main'
 
     steps:
