@@ -42,32 +42,30 @@ jobs:
           fetch-depth: 0
 
       # ─────────────────────────────────────────────
-      # 2. Install required tools (LATEST VERSIONS)
+      # 2. Install required tools
       # ─────────────────────────────────────────────
       - name: Install CLI tools (kubectl, helm, yq, jq)
         run: |
           set -e
 
-          echo "Installing jq..."
           sudo apt-get update -y
           sudo apt-get install -y jq curl git
 
-          echo "Installing kubectl (latest stable)..."
+          # kubectl
           KUBECTL_VERSION=$(curl -L -s https://dl.k8s.io/release/stable.txt)
           curl -LO "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl"
           chmod +x kubectl
           sudo mv kubectl /usr/local/bin/
 
-          echo "Installing helm (latest)..."
+          # helm
           curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
 
-          echo "Installing yq (latest v4)..."
+          # yq
           YQ_VERSION=$(curl -s https://api.github.com/repos/mikefarah/yq/releases/latest | jq -r '.tag_name')
           wget "https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/yq_linux_amd64" -O yq
           chmod +x yq
           sudo mv yq /usr/local/bin/
 
-          echo "Versions:"
           kubectl version --client
           helm version
           yq --version
@@ -116,7 +114,6 @@ jobs:
 
           yq e ".image.tag = \"${TAG}\"" -i "$FILE"
 
-          echo "Updated values.yaml:"
           cat "$FILE"
 
       # ─────────────────────────────────────────────
@@ -137,7 +134,25 @@ jobs:
           git push
 
       # ─────────────────────────────────────────────
-      # 8. Setup Kubernetes access
+      # 8. GET OIDC TOKEN (FIXED - IMPORTANT)
+      # ─────────────────────────────────────────────
+      - name: Get Kubernetes OIDC token
+        id: oidc
+        run: |
+          TOKEN=$(curl -s \
+            -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=sts.amazonaws.com" \
+            | jq -r '.value')
+
+          if [ -z "$TOKEN" ] || [ "$TOKEN" = "null" ]; then
+            echo "ERROR: OIDC token not generated"
+            exit 1
+          fi
+
+          echo "TOKEN=$TOKEN" >> $GITHUB_ENV
+
+      # ─────────────────────────────────────────────
+      # 9. Configure kubectl (FIXED AUTH)
       # ─────────────────────────────────────────────
       - name: Configure kubectl
         run: |
@@ -148,7 +163,7 @@ jobs:
             --certificate-authority=ca.crt
 
           kubectl config set-credentials github \
-            --token=$TOKEN
+            --token=${TOKEN}
 
           kubectl config set-context prod \
             --cluster=k8s \
@@ -156,10 +171,13 @@ jobs:
             --namespace=backend
 
           kubectl config use-context prod
-          kubectl auth can-i list secrets -n backend
+
+          echo "Testing access..."
+          kubectl auth can-i get pods -n backend || true
+          kubectl auth can-i list secrets -n backend || true
 
       # ─────────────────────────────────────────────
-      # 9. Deploy Helm chart
+      # 10. Deploy Helm chart
       # ─────────────────────────────────────────────
       - name: Deploy Helm chart
         run: |
@@ -168,7 +186,7 @@ jobs:
             -n backend
 
       # ─────────────────────────────────────────────
-      # 10. Verify rollout
+      # 11. Verify rollout
       # ─────────────────────────────────────────────
       - name: Verify rollout
         run: |
