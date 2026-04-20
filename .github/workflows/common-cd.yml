@@ -1,4 +1,4 @@
-name: Common_CD
+name: Manual_CD
 
 on:
   workflow_call:
@@ -18,31 +18,37 @@ on:
         required: true
       MANIFEST_REPO:
         required: true
+      CLUSTER_URL:
+        required: true
+      K8S_CA_CERT:
+        required: true
+      K8S_TOKEN:
+        required: true   # IMPORTANT (needed for kubectl auth)
 
 jobs:
   update-manifest:
-    name: "CD – Update Helm image tag"
     runs-on: ubuntu-latest
 
     permissions:
       contents: read
+      id-token: write
 
     steps:
-      - name: Checkout application repo (for version file)
+      # ── Checkout app repo ───────────────────────────────────────────────
+      - name: Checkout application repo
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      # ── Resolve the semver tag that CI just created ──────────────────────
-      - name: Get latest git tag (semver)
+      # ── Get latest git tag ──────────────────────────────────────────────
+      - name: Get latest git tag
         id: get_tag
         run: |
           git fetch --tags
           TAG=$(git describe --tags --abbrev=0)
           echo "tag=${TAG}" >> $GITHUB_OUTPUT
-          echo "Resolved image tag: ${TAG}"
 
-      # ── Generate GitHub App Token ────────────────────────────────────────
+      # ── GitHub App Token (correct usage) ────────────────────────────────
       - name: Generate GitHub App Token
         id: app-token
         uses: actions/create-github-app-token@v1
@@ -50,9 +56,9 @@ jobs:
           app-id: ${{ secrets.APP_ID }}
           private-key: ${{ secrets.APP_PRIVATE_KEY }}
           owner: ${{ github.repository_owner }}
-          repositories: "k8s-manifests"
+          repositories: k8s-manifests
 
-      # ── Checkout the manifest/helm repository ────────────────────────────
+      # ── Checkout manifest repo ───────────────────────────────────────────
       - name: Checkout manifest repo
         uses: actions/checkout@v4
         with:
@@ -60,28 +66,69 @@ jobs:
           token: ${{ steps.app-token.outputs.token }}
           path: manifest-repo
 
-      # ── Patch values.yaml with the new image tag ─────────────────────────
+      # ── Setup kubectl (NO manual install) ───────────────────────────────
+      - name: Setup kubectl
+        uses: azure/setup-kubectl@v4
+
+      # ── Setup Helm (NO manual install) ──────────────────────────────────
+      - name: Setup Helm
+        uses: azure/setup-helm@v4
+
+      # ── Setup yq (NO manual install) ────────────────────────────────────
+      - name: Setup yq
+        uses: mikefarah/yq@v4.44.3
+
+      # ── Update Helm values ──────────────────────────────────────────────
       - name: Update image tag in values.yaml
         run: |
           TAG=${{ steps.get_tag.outputs.tag }}
-          VALUES_FILE="manifest-repo/charts/${{ inputs.service-name }}/values.yaml"
+          FILE="manifest-repo/charts/${{ inputs.service-name }}/values.yaml"
 
-          yq e ".image.tag = \"${TAG}\"" -i "${VALUES_FILE}"
+          yq e ".image.tag = \"${TAG}\"" -i "${FILE}"
 
-          echo "Updated image.tag to ${TAG} in ${VALUES_FILE}"
-          cat "${VALUES_FILE}"
-
-      # ── Commit & push the tag bump ────────────────────────────────────────
-      - name: Commit and push to manifest repo
+      # ── Commit changes ──────────────────────────────────────────────────
+      - name: Commit and push
         run: |
           TAG=${{ steps.get_tag.outputs.tag }}
 
           cd manifest-repo
-          git config user.name  "github-actions[bot]"
+          git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
           git add charts/${{ inputs.service-name }}/values.yaml
-          git diff --cached --quiet && echo "No changes to commit" && exit 0
+
+          git diff --cached --quiet && echo "No changes" && exit 0
 
           git commit -m "chore(${{ inputs.service-name }}): bump image tag to ${TAG} [skip ci]"
           git push
+
+      # ── Configure kubectl (clean + correct) ─────────────────────────────
+      - name: Configure kubectl
+        run: |
+          echo "${{ secrets.K8S_CA_CERT }}" | base64 -d > ca.crt
+
+          kubectl config set-cluster k8scli \
+            --server=${{ secrets.CLUSTER_URL }} \
+            --certificate-authority=ca.crt
+
+          kubectl config set-credentials github \
+            --token=${{ secrets.K8S_TOKEN }}
+
+          kubectl config set-context prod \
+            --cluster=k8scli \
+            --user=github \
+            --namespace=backend
+
+          kubectl config use-context prod
+
+      # ── Deploy Helm chart ───────────────────────────────────────────────
+      - name: Deploy Helm chart
+        run: |
+          helm upgrade --install ${{ inputs.service-name }} \
+            manifest-repo/charts/${{ inputs.service-name }} \
+            -n backend
+
+      # ── Verify rollout ──────────────────────────────────────────────────
+      - name: Verify rollout
+        run: |
+          kubectl rollout status deployment/${{ inputs.service-name }} -n backend
