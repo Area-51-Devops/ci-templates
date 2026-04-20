@@ -24,7 +24,7 @@ on:
 
 jobs:
   update-manifest:
-    name: "CD – Update Helm image tag"
+    name: "CD - Update Helm image tag"
     runs-on: self-hosted
 
     permissions:
@@ -32,38 +32,10 @@ jobs:
       id-token: write
 
     steps:
-
       - name: Checkout application repo
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-
-      - name: Install CLI tools (kubectl, helm, yq, jq)
-        run: |
-          set -e
-
-          sudo apt-get update -y
-          sudo apt-get install -y jq curl git
-
-          # kubectl
-          KUBECTL_VERSION=$(curl -L -s https://dl.k8s.io/release/stable.txt)
-          curl -LO "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl"
-          chmod +x kubectl
-          sudo mv kubectl /usr/local/bin/
-
-          # helm
-          curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
-
-          # yq
-          YQ_VERSION=$(curl -s https://api.github.com/repos/mikefarah/yq/releases/latest | jq -r '.tag_name')
-          wget "https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/yq_linux_amd64" -O yq
-          chmod +x yq
-          sudo mv yq /usr/local/bin/
-
-          kubectl version --client
-          helm version
-          yq --version
-          jq --version
 
       - name: Get latest git tag
         id: get_tag
@@ -89,6 +61,12 @@ jobs:
           token: ${{ steps.app-token.outputs.token }}
           path: manifest-repo
 
+      - name: Setup yq
+        uses: mikefarah/yq@v4.44.3
+
+      - name: Verify yq
+        run: yq --version
+
       - name: Update image tag in values.yaml
         run: |
           TAG=${{ steps.get_tag.outputs.tag }}
@@ -112,6 +90,16 @@ jobs:
           git commit -m "chore(${{ inputs.service-name }}): bump image tag to ${TAG}"
           git push
 
+      - name: Ensure jq is installed
+        run: |
+          if ! command -v jq >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y jq
+          fi
+
+      - name: Verify jq
+        run: jq --version
+
       - name: Get Kubernetes OIDC token
         id: oidc
         run: |
@@ -126,6 +114,12 @@ jobs:
           fi
 
           echo "TOKEN=$TOKEN" >> $GITHUB_ENV
+
+      - name: Setup kubectl
+        uses: azure/setup-kubectl@v4
+
+      - name: Verify kubectl
+        run: kubectl version --client
 
       - name: Configure kubectl
         run: |
@@ -148,6 +142,12 @@ jobs:
           echo "Testing access..."
           kubectl auth can-i get pods -n backend || true
           kubectl auth can-i list secrets -n backend || true
+
+      - name: Setup Helm
+        uses: azure/setup-helm@v4
+
+      - name: Verify Helm
+        run: helm version
 
       - name: Deploy Helm chart
         run: |
