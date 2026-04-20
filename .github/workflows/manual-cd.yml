@@ -156,6 +156,7 @@ jobs:
             --namespace=backend
 
           kubectl config use-context prod
+          kubectl auth can-i list secrets -n backend
 
       # ─────────────────────────────────────────────
       # 9. Deploy Helm chart
