@@ -9,6 +9,7 @@ on:
       ci-workflow-name:
         required: true
         type: string
+        description: "Must match the 'name:' field of the triggering CI workflow"
 
     secrets:
       APP_ID:
@@ -21,22 +22,25 @@ on:
         required: true
       K8S_CA_CERT:
         required: true
+      K8S_TOKEN:
+        required: true   # IMPORTANT (needed for kubectl auth)
 
 jobs:
   update-manifest:
-    name: "CD – Update Helm image tag"
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
 
     permissions:
       contents: read
       id-token: write
 
     steps:
+      # ── Checkout app repo ───────────────────────────────────────────────
       - name: Checkout application repo
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
+      # ── Get latest git tag ──────────────────────────────────────────────
       - name: Get latest git tag
         id: get_tag
         run: |
@@ -44,6 +48,7 @@ jobs:
           TAG=$(git describe --tags --abbrev=0)
           echo "tag=${TAG}" >> $GITHUB_OUTPUT
 
+      # ── GitHub App Token (correct usage) ────────────────────────────────
       - name: Generate GitHub App Token
         id: app-token
         uses: actions/create-github-app-token@v1
@@ -51,8 +56,9 @@ jobs:
           app-id: ${{ secrets.APP_ID }}
           private-key: ${{ secrets.APP_PRIVATE_KEY }}
           owner: ${{ github.repository_owner }}
-          repositories: "k8s-manifests"
+          repositories: k8s-manifests
 
+      # ── Checkout manifest repo ───────────────────────────────────────────
       - name: Checkout manifest repo
         uses: actions/checkout@v4
         with:
@@ -60,87 +66,69 @@ jobs:
           token: ${{ steps.app-token.outputs.token }}
           path: manifest-repo
 
-      - name: Install yq
-        run: |
-          sudo apt-get update -y
-          sudo apt-get install -y curl
-          YQ_VERSION=v4.44.3
-          sudo curl -L \
-            "https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/yq_linux_amd64" \
-            -o /usr/local/bin/yq
-          sudo chmod +x /usr/local/bin/yq
-          yq --version
+      # ── Setup kubectl (NO manual install) ───────────────────────────────
+      - name: Setup kubectl
+        uses: azure/setup-kubectl@v4
 
+      # ── Setup Helm (NO manual install) ──────────────────────────────────
+      - name: Setup Helm
+        uses: azure/setup-helm@v4
+
+      # ── Setup yq (NO manual install) ────────────────────────────────────
+      - name: Setup yq
+        uses: mikefarah/yq@v4.44.3
+
+      # ── Update Helm values ──────────────────────────────────────────────
       - name: Update image tag in values.yaml
         run: |
           TAG=${{ steps.get_tag.outputs.tag }}
           FILE="manifest-repo/charts/${{ inputs.service-name }}/values.yaml"
-          yq e ".image.tag = \"${TAG}\"" -i "$FILE"
 
-      - name: Commit and push manifest changes
+          yq e ".image.tag = \"${TAG}\"" -i "${FILE}"
+
+      # ── Commit changes ──────────────────────────────────────────────────
+      - name: Commit and push
         run: |
           TAG=${{ steps.get_tag.outputs.tag }}
+
           cd manifest-repo
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
           git add charts/${{ inputs.service-name }}/values.yaml
+
           git diff --cached --quiet && echo "No changes" && exit 0
 
-          git commit -m "chore(${{ inputs.service-name }}): bump image tag to ${TAG}"
+          git commit -m "chore(${{ inputs.service-name }}): bump image tag to ${TAG} [skip ci]"
           git push
 
-      - name: Install jq
-        run: |
-          sudo apt-get update -y
-          sudo apt-get install -y jq
-          jq --version
-
-      - name: Get Kubernetes OIDC token
-        id: oidc
-        run: |
-          TOKEN=$(curl -s \
-            -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
-            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=kubernetes" \
-            | jq -r '.value')
-
-          if [ -z "$TOKEN" ] || [ "$TOKEN" = "null" ]; then
-            echo "OIDC token generation failed"
-            exit 1
-          fi
-
-          echo "TOKEN=$TOKEN" >> $GITHUB_ENV
-
-      - name: Setup kubectl
-        uses: azure/setup-kubectl@v4
-
+      # ── Configure kubectl (clean + correct) ─────────────────────────────
       - name: Configure kubectl
         run: |
           echo "${{ secrets.K8S_CA_CERT }}" | base64 -d > ca.crt
 
-          kubectl config set-cluster k8s \
+          kubectl config set-cluster k8scli \
             --server=${{ secrets.CLUSTER_URL }} \
             --certificate-authority=ca.crt
 
           kubectl config set-credentials github \
-            --token=${TOKEN}
+            --token=${{ secrets.K8S_TOKEN }}
 
           kubectl config set-context prod \
-            --cluster=k8s \
+            --cluster=k8scli \
             --user=github \
             --namespace=backend
 
           kubectl config use-context prod
 
-      - name: Setup Helm
-        uses: azure/setup-helm@v4
-
+      # ── Deploy Helm chart ───────────────────────────────────────────────
       - name: Deploy Helm chart
         run: |
           helm upgrade --install ${{ inputs.service-name }} \
             manifest-repo/charts/${{ inputs.service-name }} \
             -n backend
 
+      # ── Verify rollout ──────────────────────────────────────────────────
       - name: Verify rollout
         run: |
           kubectl rollout status deployment/${{ inputs.service-name }} -n backend
